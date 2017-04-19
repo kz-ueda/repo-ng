@@ -1,6 +1,6 @@
 /* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
 /**
- * Copyright (c) 2014-2017, Regents of the University of California.
+ * Copyright (c) 2014-2016,  Regents of the University of California.
  *
  * This file is part of NDN repo-ng (Next generation of NDN repository).
  * See AUTHORS.md for complete list of repo-ng authors and contributors.
@@ -14,7 +14,7 @@
  * PURPOSE.  See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * repo-ng, e.g., in COPYING.md file.  If not, see <http://www.gnu.org/licenses/>.
+ * repo-ng, e.g., in COPYING.md file.  if (not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "../src/repo-command-parameter.hpp"
@@ -50,7 +50,7 @@ static const uint64_t DEFAULT_FRESHNESS_PERIOD = 10000;
 static const uint64_t DEFAULT_CHECK_PERIOD = 1000;
 static const size_t PRE_SIGN_DATA_COUNT = 11;
 
-class NdnPutFile : boost::noncopyable
+class NdnPutFile : ndn::noncopyable
 {
 public:
   class Error : public std::runtime_error
@@ -79,6 +79,7 @@ public:
     , m_checkPeriod(DEFAULT_CHECK_PERIOD)
     , m_currentSegmentNo(0)
     , m_isFinished(false)
+    , m_numPktsRequired(0)
   {
   }
 
@@ -93,7 +94,7 @@ private:
   startInsertCommand();
 
   void
-  onInsertCommandResponse(const ndn::Interest& interest, const ndn::Data& data);
+  onInsertCommandResponse(const ndn::Interest& interest, ndn::Data& data);
 
   void
   onInsertCommandTimeout(const ndn::Interest& interest);
@@ -120,7 +121,7 @@ private:
   startCheckCommand();
 
   void
-  onCheckCommandResponse(const ndn::Interest& interest, const ndn::Data& data);
+  onCheckCommandResponse(const ndn::Interest& interest, ndn::Data& data);
 
   void
   onCheckCommandTimeout(const ndn::Interest& interest);
@@ -143,6 +144,8 @@ public:
   ndn::Name ndnName;
   std::istream* insertStream;
   bool isVerbose;
+  // MOD
+  uint64_t m_numPktsRequired;
 
 private:
   ndn::Face m_face;
@@ -157,6 +160,7 @@ private:
 
   typedef std::map<uint64_t, shared_ptr<ndn::Data> > DataContainer;
   DataContainer m_data;
+
 };
 
 void
@@ -186,15 +190,19 @@ NdnPutFile::prepareNextData(uint64_t referenceSegmentNo)
       boost::iostreams::read(*insertStream, reinterpret_cast<char*>(buffer), DEFAULT_BLOCK_SIZE);
 
     if (readSize <= 0) {
-      BOOST_THROW_EXCEPTION(Error("Error reading from the input stream"));
+      throw Error("Error reading from the input stream");
     }
 
     shared_ptr<ndn::Data> data =
       make_shared<ndn::Data>(Name(m_dataPrefix)
                                     .appendSegment(m_currentSegmentNo));
 
+    //MOD
+    data->setFinalBlockId(ndn::name::Component::fromSegment(m_numPktsRequired));
+    std::cerr << "FinalBlockID: " << data->getFinalBlockId() <<", Name: "<< data->getName().toUri() << std::endl;
+
     if (insertStream->peek() == std::istream::traits_type::eof()) {
-      data->setFinalBlockId(ndn::name::Component::fromSegment(m_currentSegmentNo));
+      //data->setFinalBlockId(ndn::name::Component::fromSegment(m_currentSegmentNo));
       m_isFinished = true;
     }
 
@@ -246,22 +254,25 @@ NdnPutFile::startInsertCommand()
   if (!isSingle) {
     parameters.setStartBlockId(0);
   }
+  if (m_numPktsRequired>0){
+    parameters.setEndBlockId(m_numPktsRequired);
+    std::cerr << "SET END BLOCK ID: " << m_numPktsRequired << std::endl;
+  }
 
   ndn::Interest commandInterest = generateCommandInterest(repoPrefix, "insert", parameters);
   m_face.expressInterest(commandInterest,
                          bind(&NdnPutFile::onInsertCommandResponse, this, _1, _2),
-                         bind(&NdnPutFile::onInsertCommandTimeout, this, _1), // Nack
                          bind(&NdnPutFile::onInsertCommandTimeout, this, _1));
 }
 
 void
-NdnPutFile::onInsertCommandResponse(const ndn::Interest& interest, const ndn::Data& data)
+NdnPutFile::onInsertCommandResponse(const ndn::Interest& interest, ndn::Data& data)
 {
   RepoCommandResponse response(data.getContent().blockFromValue());
   int statusCode = response.getStatusCode();
   if (statusCode >= 400) {
-    BOOST_THROW_EXCEPTION(Error("insert command failed with code " +
-                                boost::lexical_cast<std::string>(statusCode)));
+    throw Error("insert command failed with code " +
+                boost::lexical_cast<std::string>(statusCode));
   }
   m_processId = response.getProcessId();
 
@@ -272,7 +283,7 @@ NdnPutFile::onInsertCommandResponse(const ndn::Interest& interest, const ndn::Da
 void
 NdnPutFile::onInsertCommandTimeout(const ndn::Interest& interest)
 {
-  BOOST_THROW_EXCEPTION(Error("command response timeout"));
+  throw Error("command response timeout");
 }
 
 void
@@ -291,7 +302,7 @@ NdnPutFile::onInterest(const ndn::Name& prefix, const ndn::Interest& interest)
     ndn::Name::Component segmentComponent = interest.getName().get(prefix.size());
     segmentNo = segmentComponent.toSegment();
   }
-  catch (const tlv::Error& e) {
+  catch (tlv::Error& e) {
     if (isVerbose) {
       std::cerr << "Error processing incoming interest " << interest << ": "
                 << e.what() << std::endl;
@@ -334,11 +345,11 @@ NdnPutFile::onSingleInterest(const ndn::Name& prefix, const ndn::Interest& inter
     boost::iostreams::read(*insertStream, reinterpret_cast<char*>(buffer), DEFAULT_BLOCK_SIZE);
 
   if (readSize <= 0) {
-    BOOST_THROW_EXCEPTION(Error("Error reading from the input stream"));
+    throw Error("Error reading from the input stream");
   }
 
   if (insertStream->peek() != std::istream::traits_type::eof()) {
-    BOOST_THROW_EXCEPTION(Error("Input data does not fit into one Data packet"));
+    throw Error("Input data does not fit into one Data packet");
   }
 
   shared_ptr<ndn::Data> data = make_shared<ndn::Data>(m_dataPrefix);
@@ -353,7 +364,7 @@ NdnPutFile::onSingleInterest(const ndn::Name& prefix, const ndn::Interest& inter
 void
 NdnPutFile::onRegisterFailed(const ndn::Name& prefix, const std::string& reason)
 {
-  BOOST_THROW_EXCEPTION(Error("onRegisterFailed: " + reason));
+  throw Error("onRegisterFailed: " + reason);
 }
 
 void
@@ -387,18 +398,17 @@ NdnPutFile::startCheckCommand()
                                                           .setProcessId(m_processId));
   m_face.expressInterest(checkInterest,
                          bind(&NdnPutFile::onCheckCommandResponse, this, _1, _2),
-                         bind(&NdnPutFile::onCheckCommandTimeout, this, _1), // Nack
                          bind(&NdnPutFile::onCheckCommandTimeout, this, _1));
 }
 
 void
-NdnPutFile::onCheckCommandResponse(const ndn::Interest& interest, const ndn::Data& data)
+NdnPutFile::onCheckCommandResponse(const ndn::Interest& interest, ndn::Data& data)
 {
   RepoCommandResponse response(data.getContent().blockFromValue());
   int statusCode = response.getStatusCode();
   if (statusCode >= 400) {
-    BOOST_THROW_EXCEPTION(Error("Insert check command failed with code: " +
-                                boost::lexical_cast<std::string>(statusCode)));
+    throw Error("Insert check command failed with code: " +
+                boost::lexical_cast<std::string>(statusCode));
   }
 
   if (m_isFinished) {
@@ -426,7 +436,7 @@ NdnPutFile::onCheckCommandResponse(const ndn::Interest& interest, const ndn::Dat
 void
 NdnPutFile::onCheckCommandTimeout(const ndn::Interest& interest)
 {
-  BOOST_THROW_EXCEPTION(Error("check response timeout"));
+  throw Error("check response timeout");
 }
 
 ndn::Interest
@@ -497,7 +507,7 @@ main(int argc, char** argv)
       try {
         ndnPutFile.freshnessPeriod = milliseconds(boost::lexical_cast<uint64_t>(optarg));
       }
-      catch (const boost::bad_lexical_cast&) {
+      catch (boost::bad_lexical_cast&) {
         std::cerr << "-x option should be an integer.";
         return 1;
       }
@@ -506,7 +516,7 @@ main(int argc, char** argv)
       try {
         ndnPutFile.interestLifetime = milliseconds(boost::lexical_cast<uint64_t>(optarg));
       }
-      catch (const boost::bad_lexical_cast&) {
+      catch (boost::bad_lexical_cast&) {
         std::cerr << "-l option should be an integer.";
         return 1;
       }
@@ -516,7 +526,7 @@ main(int argc, char** argv)
       try {
         ndnPutFile.timeout = milliseconds(boost::lexical_cast<uint64_t>(optarg));
       }
-      catch (const boost::bad_lexical_cast&) {
+      catch (boost::bad_lexical_cast&) {
         std::cerr << "-w option should be an integer.";
         return 1;
       }
@@ -551,6 +561,13 @@ main(int argc, char** argv)
       std::cerr << "ERROR: cannot open " << argv[2] << std::endl;
       return 1;
     }
+    // MOD START: FOR SIZE CHECK (kz-ueda)
+    size_t fileSize = (size_t)inputFileStream.seekg(0, std::ios::end).tellg();
+    std::cerr << "FILE SIZE = " << fileSize << std::endl;
+    inputFileStream.seekg(0, std::ios::beg);
+    ndnPutFile.m_numPktsRequired = fileSize / DEFAULT_BLOCK_SIZE;
+    std::cerr << "# OF PKTS: "<< ndnPutFile.m_numPktsRequired	<< std::endl;
+    // MOD END
 
     ndnPutFile.insertStream = &inputFileStream;
     ndnPutFile.run();
@@ -569,7 +586,7 @@ main(int argc, char** argv)
   try {
     return repo::main(argc, argv);
   }
-  catch (const std::exception& e) {
+  catch (std::exception& e) {
     std::cerr << "ERROR: " << e.what() << std::endl;
     return 2;
   }
